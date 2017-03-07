@@ -1,4 +1,4 @@
-    #!/usr/bin/python
+#!/usr/bin/python
 
 #import all of the required modules
 import sys
@@ -14,63 +14,13 @@ import ConfigParser
 import subprocess
 import smtplib
 from shutil import copyfile
+import filecmp
+import os.path
 
 #arguments will be in a separate .ini file (sys.argv[1]) which is read in and parsed to get different argument types
 inputfile=str(sys.argv[1]) #the input .ini file is given as the first argument when the python script is called
-Config = ConfigParser.ConfigParser()
-Config.read(inputfile)
 
-#Main light cycle
-brightness=Config.getint("settings", "brightness") #brightness for main lights on. This will be passed to all steps, so further brightness must be adjusted via the color levels.
-R=Config.getint("settings", "R") #red spectrum for main lights on
-G=Config.getint("settings", "G") #green spectrum for main lights on
-B=Config.getint("settings", "B") #blue spectrum for main lights on
-W=Config.getint("settings", "W") #white spectrum for main lights on
-onTime=Config.getfloat("settings", "onTime") #time in hours that lights will reach full intensity
-offTime=Config.getfloat("settings", "offTime") #time in hours that lights will stop being at full intensity
-checkTime=Config.getfloat("settings", "checkTime") #frequency in seconds of checking time and recording data (usually 60 seconds)
-outFile=Config.get("settings", "outfile_name") #name of output file that will save data log
-highAlarm=Config.getfloat("settings", "highAlarm") #Alarm temperature high
-lowAlarm=Config.getfloat("settings", "lowAlarm") #Alarm temperature low
-
-#Pulse
-Pulse=Config.getboolean("pulse", "Pulse") #True/false for whether a light pulse will be used
-Pulse_on=Config.getfloat("pulse", "Pulse_on") #Time in hours that pulse will start
-Pulse_off=Config.getfloat("pulse", "Pulse_off") #Time in hours that pulse will end
-Pulse_R=Config.getint("pulse", "Pulse_R") #red spectrum for pulse
-Pulse_G=Config.getint("pulse", "Pulse_G") #green spectrum for pulse
-Pulse_B=Config.getint("pulse", "Pulse_B") #blue spectrum for pulse
-Pulse_W=Config.getint("pulse", "Pulse_W") #white spectrum for pulse
-
-#Ramp on
-Ramp_on=Config.getboolean("ramp_on", "Ramp_on") #true/false for whether a ramp will be used
-ramp_ontime=Config.getfloat("ramp_on", "Ramp_ontime") #time in hours that lights will start ramping on
-
-#Ramp off
-Ramp_off=Config.getboolean("ramp_off", "Ramp_off") #true/false for whether a ramp will be used
-ramp_offtime=Config.getfloat("ramp_off", "Ramp_offtime") #time in hours that lights will complete ramping
-
-#Heat
-Heat=Config.getboolean("heat", "Heat") #true false for whether the heater will be used
-heatOn=Config.getfloat("heat", "heatOn") #time in hours that heater should turn on
-heatOff=Config.getfloat("heat", "heatOff") #time in hours that heater should turn off
-
-#color2
-color2=Config.getboolean("color2", "color2_used") #true false for using a second color
-color2_offtime=Config.getfloat("color2", "color2_offtime") #off time for second color
-R2=Config.getint("color2", "R2") #red spectrum for second color
-G2=Config.getint("color2", "G2") #green spectrum for second color
-B2=Config.getint("color2", "B2") #blue spectrum for second color
-W2=Config.getint("color2", "W2") #white spectrum for second color
-
-#color3
-color3=Config.getboolean("color3", "color3_used") #true false for using a third color
-color3_offtime=Config.getfloat("color3", "color3_offtime") #off time for a third color
-R3=Config.getint("color3", "R3") #red spectrum for third color
-G3=Config.getint("color3", "G3") #green spectrum for third color
-B3=Config.getint("color3", "B3") #blue spectrum for third color
-W3=Config.getint("color3", "W3") #white spectrum for third color
-
+#setup hardware (only ever needs to happen once)
 #set up LED indicator light via GPIO 16 (turns on whenever lights are on)
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(16, GPIO.OUT)
@@ -84,44 +34,13 @@ tsl = TSL2561(0x39,"/dev/i2c-1")
 tsl.enable_autogain()
 tsl.set_time(0x00)
 
-#specify LED configuration
-LED_COUNT      = 24                 # Number of LED pixels (always 24 in ring).
-LED_PIN        = 18                 # GPIO pin connected to the pixels (must support PWM-always 18!).
-LED_FREQ_HZ    = 800000             # LED signal frequency in hertz (usually 800khz)
-LED_DMA        = 5                  # DMA channel to use for generating signal (try 5)
-LED_BRIGHTNESS = brightness         # Set to 0 for darkest and 255 for brightest
-LED_INVERT     = False              # True to invert the signal (when using NPN transistor
-LED_CHANNEL    = 0
-LED_STRIP      = ws.SK6812_STRIP_RGBW
-
-# Create NeoPixel object with appropriate configuration.
-strip = Adafruit_NeoPixel(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL, LED_STRIP)
-
-# Intialize the library (must be called once before other functions).
-strip.begin()
-
 #Turn on temperature sensor
 sensor = MCP9808.MCP9808()
 sensor.begin()
 
-#make a master datafile
-c =(open(outFile, 'wb'))
-wrtr = csv.writer(c)
-
-#write a header column in master file
-wrtr.writerow(["TimeStamp", "Elapsed", "MCP9808Temp", "SHT31Temp", "Humidity", "Lux", "Lights", "Time_in_hours", "R", "G", "B", "W", "Heater"])
-c.flush()
-
-#determine program start time
-programstart=time.time()
-
 #determine hostname of computer and start a day counter
 hostname=subprocess.check_output(["hostname"]).strip()
 lastday=0
-
-#indicate that no alarm email has been sent and no time has passed since last alarm
-hasAlarmed=False
-timeSinceAlarm=0
 
 #define function for sending warning email if tempearture is out of range:
 GMAIL_USER= "bergland.rpi@gmail.com"
@@ -141,17 +60,106 @@ def send_email(recipient, subject, text):
     smtpserver.sendmail(GMAIL_USER, recipient, msg)
     smtpserver.close()
 
-#make a dated copy of current configuration file at start of run
-configpath="/home/pi/"+inputfile
-configcopy="/home/pi/"+inputfile+time.strftime("%Y-%m-%d")+"copy.log"
+#function to read in all aspects of configuration
+def readInput(startingfile):
+    d={}
+    f = open(startingfile, 'r')
+    for line in f:
+        k, v = line.strip().split('=')
+        d[k.strip()] = v.strip()
+    f.close()
+    return d
+
+#convert numerical dicitonary values to floats and ints
+intlist=["LED_COUNT","brightness", "R", "G", "B", "W", "Pulse_R", "Pulse_G", "Pulse_B", "Pulse_W", "R2", "G2", "W2", "B2", "R3", "B3", "G3", "W3"]
+def convertInt(dict,intlist):
+    for i in intlist:
+        dict[i]=int(dict[i])
+
+floatlist=["onTime", "offTime", "checkTime", "highAlarm", "lowAlarm", "Pulse_on", "Pulse_off", "Ramp_ontime", "Ramp_offtime", "heatOn", "heatOff", "color2_offtime", "color3_offtime"]
+def convertFloat(dict,floatlist):
+    for f in floatlist:
+        dict[f]=float(dict[f])
+
+#make a master datafile
+def makeOutFile(outfile):
+    C =(open(outfile, 'wb'))
+    return C
+
+def makeOutWriteable(C):
+    WRTR = csv.writer(C)
+    return WRTR
+
+def writeHeader(WRTR, C):    #write a header column in master file
+    WRTR.writerow(["TimeStamp", "Elapsed", "MCP9808Temp", "SHT31Temp", "Humidity", "Lux", "Lights", "Time_in_hours", "R", "G", "B", "W", "Heater"])
+    C.flush()
+
+configpath=inputfile
+configcopy=hostname+"-config-"+time.strftime("%Y-%m-%d")+"-copy.log"
 copyfile(configpath, configcopy)
 
-#start checking the time
+#read input file on first time through program and configure
+a=readInput(inputfile)
+convertInt(a,intlist)
+convertFloat(a,floatlist)
+#specify LED configuration
+LED_COUNT      = a["LED_COUNT"]                 # Number of LED pixels (always 24 in ring).
+LED_PIN        = 18                 # GPIO pin connected to the pixels (must support PWM-always 18!).
+LED_FREQ_HZ    = 800000             # LED signal frequency in hertz (usually 800khz)
+LED_DMA        = 5                  # DMA channel to use for generating signal (try 5)
+LED_BRIGHTNESS = a["brightness"]         # Set to 0 for darkest and 255 for brightest
+LED_INVERT     = False              # True to invert the signal (when using NPN transistor
+LED_CHANNEL    = 0
+LED_STRIP      = ws.SK6812_STRIP_RGBW
+# Create NeoPixel object with appropriate configuration.
+strip = Adafruit_NeoPixel(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL, LED_STRIP)
+# Intialize the library (must be called once before other functions).
+strip.begin()
+
+#generate data files
+outfile_name=hostname+"-restart-"+time.strftime("%Y-%m-%d")+".csv"
+c=makeOutFile(outfile_name)
+wrtr=makeOutWriteable(c)
+writeHeader(wrtr, c)
+#determine program start time with current configuration
+programstart=time.time()
+#indicate that no alarm email has been sent and no time has passed since last alarm
+hasAlarmed=False
+timeSinceAlarm=0
+
+#start checking the time and performing an infinite loop
 while True:
+    loopstart=time.time() 
+    #check if input file has changed from the backup copy
+    new=open(configpath,"r").read()
+    old=open(configcopy,"r").read()
+    if new != old: #reset everything if configuration file has changed
+        print "resetting"
+        email_text=hostname+" has started a new program: "+ new
+        email_subject=hostname+" has reset"
+        send_email("priscilla.erickson@gmail.com", email_subject, email_text)
+        a=readInput(inputfile)
+        convertInt(a,intlist)
+        convertFloat(a,floatlist)
+        LED_COUNT      = a["LED_COUNT"]
+        LED_BRIGHTNESS = a["brightness"]
+        strip = Adafruit_NeoPixel(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL, LED_STRIP)
+        strip.begin()
+        configcopy=inputfile+time.strftime("%Y-%m-%d")+"copy.log"
+        copyfile(configpath,configcopy)
+        programstart=time.time()
+        outfile_name=hostname+"-restart-"+time.strftime("%Y-%m-%d")+".csv"
+        c=makeOutFile(outfile_name)
+        wrtr=makeOutWriteable(c)
+        writeHeader(wrtr, c)
+        hasAlarmed=False
+        timeSinceAlarm=0
+    else:
+        print "no reset"
 
     #determine current time
-    loopstart=time.time() #record start time of loop so that total loop time can be precisely adjusted
-    now= time.localtime(time.time()) #current time
+    #record start time of loop so that total loop time can be precisely adjusted
+    now=time.localtime(time.time()) #current time
     elapsedtime=(time.time()-programstart)/3600 #Elapsed time in hours since program started
     timeStamp=time.strftime("%Y-%m-%d %H:%M:%S", now) #break time into H, M, S
     print timeStamp
@@ -164,16 +172,27 @@ while True:
     time_in_hours=hour+minute/60+second/3600
 
     #make a daily file if needed right after midnight when day counter has turned over
-    if lastday != day:
-        todaysdate=time.strftime("%Y-%m-%d", now)
-        dailyfilename=hostname+"-"+todaysdate+".csv"
+    todaysdate=time.strftime("%Y-%m-%d", now)
+    dailyfilename=hostname+"-"+todaysdate+".csv" 
+    if lastday == 0 and os.path.isfile(dailyfilename)==False : #program is starting for first time and file doesn't exist; make new file
         df =(open(dailyfilename, 'wb'))
         dfwrtr = csv.writer(df)
         dfwrtr.writerow(["TimeStamp", "Elapsed", "MCP9808Temp", "SHT31Temp", "Humidity", "Lux", "Lights", "Time_in_hours", "R", "G", "B", "W", "Heater"])
         df.flush()
-
+    elif lastday == 0 and os.path.isfile(dailyfilename) == True :#program is starting but file already exists; append
+        df =(open(dailyfilename, 'a'))
+        dfwrtr = csv.writer(df)
+    elif lastday != day :#day has turned over; make a new file
+        df=(open(dailyfilename, 'wb'))
+        dfwrtr = csv.writer(df)
+        dfwrtr.writerow(["TimeStamp", "Elapsed", "MCP9808Temp", "SHT31Temp", "Humidity", "Lux", "Lights", "Time_in_hours", "R", "G", "B", "W", "Heater"])
+        df.flush()
+    else:
+        df =(open(dailyfilename, 'a'))
+        dfwrtr = csv.writer(df)
+    
     #turn heat on if needed
-    if Heat == True and heatOn <= time_in_hours < heatOff:
+    if a["Heat"] == "True" and a["heatOn"] <= time_in_hours < a["heatOff"]:
         GPIO.output(23, True)
         print "Heat on!"
         heater=True
@@ -194,13 +213,14 @@ while True:
     #Send email if temperature is out of range
     if hasAlarmed==True:
         timeSinceAlarm=time.time()-alarmTime
-    if (currtemp < lowAlarm or currtemp > highAlarm) and (elapsedtime > 0.05) and (hasAlarmed==False or timeSinceAlarm > 14400):
+        
+    if (currtemp < a["lowAlarm"] or currtemp > a["highAlarm"]) and (elapsedtime > 0.05) and (hasAlarmed==False or timeSinceAlarm > 14400):
         print 'Alarm!'
         print 'Current temp=', currtemp
-        print 'High Alarm=', highAlarm
-        print 'Low Alarm=', lowAlarm
-        subject=hostname+ "has a temperature problem"
-        message=hostname+ "has a temperature of " + str(currtemp)
+        print 'High Alarm=', a["highAlarm"]
+        print 'Low Alarm=', a["lowAlarm"]
+        subject=hostname+ " has a temperature problem"
+        message=hostname+ " has a temperature of " + str(currtemp)
         send_email("priscilla.erickson@gmail.com", subject, message)
         print "Email sent"
         hasAlarmed=True
@@ -210,29 +230,29 @@ while True:
         print 'No Alarm'
 
     #check for light pulse
-    if Pulse == True and Pulse_on <= time_in_hours < Pulse_off:
+    if a["Pulse"] == "True" and a["Pulse_on"] <= time_in_hours < a["Pulse_off"]:
         print "Pulsing"
         lights="Pulse"
         GPIO.output(16, True)
-        for i in range(LED_COUNT):
-            strip.setPixelColor(i,Color(Pulse_G,Pulse_R,Pulse_B,Pulse_W))
+        for i in range(a["LED_COUNT"]):
+            strip.setPixelColor(i,Color(int(a["Pulse_G"]), int(a["Pulse_R"]),int(a["Pulse_B"]),int(a["Pulse_W"])))
             strip.show()
-        currR=Pulse_R
-        currG=Pulse_G
-        currB=Pulse_B
-        currW=Pulse_W
+        currR=a["Pulse_R"]
+        currG=a["Pulse_G"]
+        currB=a["Pulse_B"]
+        currW=a["Pulse_W"]
 
     #then check for ramping on. Ramp lights are automatically same as first color
-    elif Ramp_on == True and ramp_ontime <= time_in_hours < onTime:
+    elif a["Ramp_on"] == "True" and (a["Ramp_ontime"] <= time_in_hours < a["onTime"]):
         print "Ramping on"
-        Ramp_time=onTime - ramp_ontime #total time that will be spent ramping
-        fade=(time_in_hours-ramp_ontime)/Ramp_time #proportion of ramping that is completed
+        Ramp_time=a["onTime"] - a["Ramp_ontime"] #total time that will be spent ramping
+        fade=(time_in_hours-a["Ramp_ontime"])/Ramp_time #proportion of ramping that is completed
         lights="increasing"
-        tempR=int(float(R)*fade) #calculate a red value based on proporition of ramping completed
-        tempG=int(float(G)*fade) #calculate a green value based on proporition of ramping completed
-        tempB=int(float(B)*fade) #calculate a blue value based on proporition of ramping completed
-        tempW=int(float(W)*fade) #calculate a white value based on proporition of ramping completed
-        for i in range(LED_COUNT):
+        tempR=int(float(a["R"])*fade) #calculate a red value based on proporition of ramping completed
+        tempG=int(float(a["G"])*fade) #calculate a green value based on proporition of ramping completed
+        tempB=int(float(a["B"])*fade) #calculate a blue value based on proporition of ramping completed
+        tempW=int(float(a["W"])*fade) #calculate a white value based on proporition of ramping completed
+        for i in range(a["LED_COUNT"]):
             GPIO.output(16, True)
             strip.setPixelColor(i,Color(tempG,tempR,tempB,tempW)) #assigns a temporary modulated color value based on ramp progression
             strip.show()
@@ -242,55 +262,55 @@ while True:
         currW=tempW
 
     #then check if lights are on main cycle
-    elif onTime <= time_in_hours < offTime:
+    elif a["onTime"] <= time_in_hours < a["offTime"]:
         print ' Lights on!'
         lights="on, main"
         GPIO.output(16, True)
         for i in range(LED_COUNT):
-            strip.setPixelColor(i,Color(G,R,B,W)) #sets LEDs to main color
+            strip.setPixelColor(i,Color(a["G"], a["R"], a["B"], a["W"])) #sets LEDs to main color
             strip.show()
-        currR=R
-        currG=G
-        currB=B
-        currW=W
+        currR=a["R"]
+        currG=a["G"]
+        currB=a["B"]
+        currW=a["W"]
 
     #then check if lights should be on color2
-    elif color2==True and offTime <= time_in_hours < color2_offtime:
-        print ' Lights on color2!'
+    elif a["color2_used"]=="True" and a["offTime"] <= time_in_hours < a["color2_offtime"]:
+        print 'Lights on color2!'
         lights="on, color2"
         GPIO.output(16, True)
-        for i in range(LED_COUNT):
-            strip.setPixelColor(i,Color(G2,R2,B2,W2)) #sets strip to second color scheme
+        for i in range(a["LED_COUNT"]):
+            strip.setPixelColor(i,Color(a["G2"],a["R2"],a["B2"],a["W2"])) #sets strip to second color scheme
             strip.show()
-        currR=R2
-        currG=G2
-        currB=B2
-        currW=W2
+        currR=a["R2"]
+        currG=a["G2"]
+        currB=a["B2"]
+        currW=a["W2"]
 
     #then check if lights should be on color3
-    elif color3 ==True and color2_offtime <= time_in_hours < color3_offtime:
+    elif a["color3_used"] =="True" and a["color2_offtime"] <= time_in_hours < a["color3_offtime"]:
         print ' Lights on color 3!'
         lights="on, color3"
         GPIO.output(16, True)
-        for i in range(LED_COUNT):
-            strip.setPixelColor(i,Color(G3,R3,B3,W3)) #sets lights to third color scheme
+        for i in range(a["LED_COUNT"]):
+            strip.setPixelColor(i,Color(a["G3"],a["R3"],a["B3"],a["W3"])) #sets lights to third color scheme
             strip.show()
-        currR=R3
-        currG=G3
-        currB=B3
-        currW=W3
+        currR=a["R3"]
+        currG=a["G3"]
+        currB=a["B3"]
+        currW=a["W3"]
 
     #then check for ramping off. Ramping off will occur for last used color
-    elif Ramp_off == True and color2 == False and color3 == False and offTime <= time_in_hours < ramp_offtime:
+    elif a["Ramp_off"] == "True" and a["color2_used"] == "False" and a["color3_used"] == "False" and a["offTime"] <= time_in_hours < a["ramp_offtime"]:
         print "Ramping off"
-        Ramp_time=ramp_offtime - offTime #total time that will be spent ramping down
-        fade=(ramp_offtime-time_in_hours)/Ramp_time #proportion of ramping that is uncompleted
+        Ramp_time=a["ramp_offtime"] - a["offTime"] #total time that will be spent ramping down
+        fade=(a["ramp_offtime"]-time_in_hours)/Ramp_time #proportion of ramping that is uncompleted
         lights="decreasing main color"
-        tempR=int(float(R)*fade) #calculate a red value based on proporition of ramping completed
-        tempG=int(float(G)*fade) #calculate a green value based on proporition of ramping completed
-        tempB=int(float(B)*fade) #calculate a blue value based on proporition of ramping completed
-        tempW=int(float(W)*fade) #calculate a white value based on proporition of ramping completed
-        for i in range(LED_COUNT):
+        tempR=int(float(a["R"])*fade) #calculate a red value based on proporition of ramping completed
+        tempG=int(float(a["G"])*fade) #calculate a green value based on proporition of ramping completed
+        tempB=int(float(a["B"])*fade) #calculate a blue value based on proporition of ramping completed
+        tempW=int(float(a["W"])*fade) #calculate a white value based on proporition of ramping completed
+        for i in range(a["LED_COUNT"]):
             GPIO.output(16, True)
             strip.setPixelColor(i,Color(tempG,tempR,tempB,tempW))
             strip.show()
@@ -300,16 +320,16 @@ while True:
         currW=tempW
 
     #ramping off if 2 colors:
-    elif Ramp_off == True and color2 == True and color3 == False and color2_offtime <= time_in_hours < ramp_offtime:
+    elif a["Ramp_off"] == "True" and a["color2_used"] == "True" and a["color3_used"] == "False" and a["color2_offtime"] <= time_in_hours < a["Ramp_offtime"]:
         print "Ramping off color2"
-        Ramp_time=ramp_offtime - color2_offtime #total time that will be spent ramping down
-        fade=(ramp_offtime-time_in_hours)/Ramp_time #proportion of ramping that is uncompleted
+        Ramp_time=a["Ramp_offtime"] - a["color2_offtime"] #total time that will be spent ramping down
+        fade=(a["Ramp_offtime"]-time_in_hours)/Ramp_time #proportion of ramping that is uncompleted
         lights="decreasing color2"
-        tempR=int(float(R2)*fade) #calculate a red value based on proporition of ramping completed
-        tempG=int(float(G2)*fade) #calculate a green value based on proporition of ramping completed
-        tempB=int(float(B2)*fade) #calculate a blue value based on proporition of ramping completed
-        tempW=int(float(W2)*fade) #calculate a white value based on proporition of ramping completed
-        for i in range(LED_COUNT):
+        tempR=int(float(a["R2"])*fade) #calculate a red value based on proporition of ramping completed
+        tempG=int(float(a["G2"])*fade) #calculate a green value based on proporition of ramping completed
+        tempB=int(float(a["B2"])*fade) #calculate a blue value based on proporition of ramping completed
+        tempW=int(float(a["W2"])*fade) #calculate a white value based on proporition of ramping completed
+        for i in range(a["LED_COUNT"]):
             GPIO.output(16, True)
             strip.setPixelColor(i,Color(tempG,tempR,tempB,tempW))
             strip.show()
@@ -319,16 +339,16 @@ while True:
         currW=tempW
 
     #ramping off if 3 colors:
-    elif Ramp_off == True and color2 == True and color3 == True and color3_offtime <= time_in_hours < ramp_offtime:
+    elif a["Ramp_off"] == "True" and a["color2_used"] == "True" and a["color3_used"] == "True" and a["color3_offtime"] <= time_in_hours < a["Ramp_offtime"]:
         print "Ramping off color3"
-        Ramp_time=ramp_offtime - color3_offtime #total time that will be spent ramping down
-        fade=(ramp_offtime-time_in_hours)/Ramp_time #proportion of ramping that is uncompleted
+        Ramp_time=a["Ramp_offtime"] - a["color3_offtime"] #total time that will be spent ramping down
+        fade=(a["Ramp_offtime"]-time_in_hours)/Ramp_time #proportion of ramping that is uncompleted
         lights="decreasing color3"
-        tempR=int(float(R3)*fade) #calculate a red value based on proporition of ramping completed
-        tempG=int(float(G3)*fade) #calculate a green value based on proporition of ramping completed
-        tempB=int(float(B3)*fade) #calculate a blue value based on proporition of ramping completed
-        tempW=int(float(W3)*fade) #calculate a white value based on proporition of ramping completed
-        for i in range(LED_COUNT):
+        tempR=int(float(a["R3"])*fade) #calculate a red value based on proporition of ramping completed
+        tempG=int(float(a["G3"])*fade) #calculate a green value based on proporition of ramping completed
+        tempB=int(float(a["B3"])*fade) #calculate a blue value based on proporition of ramping completed
+        tempW=int(float(a["W3"])*fade) #calculate a white value based on proporition of ramping completed
+        for i in range(a["LED_COUNT"]):
             GPIO.output(16, True)
             strip.setPixelColor(i,Color(tempG,tempR,tempB,tempW))
             strip.show()
@@ -342,7 +362,7 @@ while True:
         print 'Lights off!, LED off'
         GPIO.output(16,False)
         lights="Off"
-        for i in range(LED_COUNT):
+        for i in range(a["LED_COUNT"]):
             strip.setPixelColor(i,Color(0,0,0,0))
             strip.show()
         currR=0
@@ -361,5 +381,5 @@ while True:
     lastday=day
 
     # determine how much time to wait so that loop is executed based on checkTime seconds
-    time.sleep(checkTime - ((time.time() - loopstart) % 60.0))
+    time.sleep(a["checkTime"] - ((time.time() - loopstart) % 60.0))
 
